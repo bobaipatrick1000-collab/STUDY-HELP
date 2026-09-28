@@ -111,47 +111,51 @@ async function main(): Promise<void> {
     check("null markdown falls back to description", fc.results[1]?.text === "Snippet only.")
   }
 
-  console.log("\n[2a2] Firecrawl is the primary provider, Tavily is only a fallback")
+  console.log("\n[2a2] Tavily is the primary provider, Firecrawl is only a fallback")
   const callOrder: string[] = []
   installMock((url) => {
+    if (url.includes("api.tavily.com")) {
+      callOrder.push("tavily")
+      return jsonResponse(200, { results: [{ title: "Tavily primary", url: "https://t.example", content: "body", raw_content: "full tavily text" }] })
+    }
     if (url.includes("firecrawl")) {
       callOrder.push("firecrawl")
       return jsonResponse(200, firecrawlPayload)
-    }
-    if (url.includes("api.tavily.com")) {
-      callOrder.push("tavily")
-      return jsonResponse(200, { results: [{ title: "Tavily only", url: "https://t.example", content: "body", raw_content: "body" }] })
     }
     callOrder.push("other")
     return jsonResponse(200, bravePayload)
   })
   const primary = await searchWeb("photosynthesis")
-  check("Firecrawl answers without touching Tavily", primary.ok && callOrder.join(",") === "firecrawl", callOrder.join(","))
-  check("Firecrawl text is used for grounding", (primary.ok ? primary.results[0]?.text.length ?? 0 : 0) > 200)
+  check("Tavily answers without touching Firecrawl", primary.ok && callOrder.join(",") === "tavily", callOrder.join(","))
+  check("Tavily text is used for grounding", (primary.ok ? primary.results[0]?.text.length ?? 0 : 0) > 5)
 
-  console.log("\n[2a3] Firecrawl fails -> Tavily answers next")
+  console.log("\n[2a3] Tavily fails -> Firecrawl answers next")
   installMock((url) => {
-    if (url.includes("firecrawl")) return jsonResponse(401, {})
-    if (url.includes("api.tavily.com")) return jsonResponse(200, { results: [{ title: "Tavily backup", url: "https://t.example", content: "snippet", raw_content: "full tavily text" }] })
+    if (url.includes("api.tavily.com")) return jsonResponse(402, {})
+    if (url.includes("firecrawl")) return jsonResponse(200, firecrawlPayload)
     if (url.includes("serper.dev")) return jsonResponse(200, serperPayload)
     return jsonResponse(200, bravePayload)
   })
-  const afterFc = await searchWeb("photosynthesis")
-  check("falls through to Tavily", afterFc.ok && afterFc.results[0]?.text === "full tavily text", afterFc.ok ? afterFc.results[0]?.text ?? "" : "failed")
+  const afterTavily = await searchWeb("photosynthesis")
+  check("falls through to Firecrawl", afterTavily.ok && (afterTavily.results[0]?.text.length ?? 0) > 200, afterTavily.ok ? "text=" + String(afterTavily.results[0]?.text.length ?? 0) : "failed")
 
-  console.log("\n[2a4] Firecrawl key empty -> skipped, next provider answers")
-  process.env.FIRECRAWL_API_KEY = ""
-  installMock((url) => {
-    if (url.includes("firecrawl")) {
-      check("Firecrawl never called without a key", false, "it was called")
-      return jsonResponse(200, firecrawlPayload)
+  console.log("\n[2a4] Tavily key empty -> still tried, but keyless (no Authorization header)")
+  const realTavilyKey = process.env.SEARCH_API_KEY
+  process.env.SEARCH_API_KEY = ""
+  let keylessAuthSeen: string | null = null
+  installMock((url, init) => {
+    if (url.includes("api.tavily.com")) {
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      keylessAuthSeen = headers.Authorization === undefined ? "absent" : String(headers.Authorization)
+      return jsonResponse(200, { results: [{ title: "Tavily keyless", url: "https://t.example", content: "snippet", raw_content: "keyless tavily text" }] })
     }
-    if (url.includes("api.tavily.com")) return jsonResponse(200, { results: [{ title: "Tavily backup", url: "https://t.example", content: "snippet", raw_content: "tavily text" }] })
+    if (url.includes("firecrawl")) return jsonResponse(200, firecrawlPayload)
     return jsonResponse(200, bravePayload)
   })
-  const skippedPrimary = await searchWeb("photosynthesis")
-  check("Tavily answers when Firecrawl has no key", skippedPrimary.ok && skippedPrimary.results[0]?.text === "tavily text")
-  process.env.FIRECRAWL_API_KEY = "test-firecrawl-key"
+  const keyless = await searchWeb("photosynthesis")
+  check("Tavily is still used without a key (keyless access)", keyless.ok && keyless.results[0]?.text === "keyless tavily text")
+  check("no Authorization header is sent when keyless", keylessAuthSeen === "absent", keylessAuthSeen ?? "not called")
+  if (realTavilyKey !== undefined) process.env.SEARCH_API_KEY = realTavilyKey
 
   console.log("\n[2a5] SEARCH_PROVIDER=firecrawl forces Firecrawl")
   process.env.SEARCH_PROVIDER = "firecrawl"

@@ -483,7 +483,7 @@ const PROVIDER_LABELS: Record<SearchProvider, string> = {
   brave: "Brave",
 }
 
-const PROVIDER_CHAIN: SearchProvider[] = ["firecrawl", "tavily", "serper", "brave"]
+const PROVIDER_CHAIN: SearchProvider[] = ["tavily", "firecrawl", "serper", "brave"]
 
 function providerConfigured(provider: SearchProvider): boolean {
   if (provider === "firecrawl") return (process.env.FIRECRAWL_API_KEY ?? "").trim() !== ""
