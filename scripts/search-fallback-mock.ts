@@ -111,42 +111,46 @@ async function main(): Promise<void> {
     check("null markdown falls back to description", fc.results[1]?.text === "Snippet only.")
   }
 
-  console.log("\n[2a2] Firecrawl sits directly after Tavily in the chain")
-  const fcOrder: string[] = []
+  console.log("\n[2a2] Firecrawl is the primary provider, Tavily is only a fallback")
+  const callOrder: string[] = []
   installMock((url) => {
-    if (url.includes("api.tavily.com")) return jsonResponse(402, {})
     if (url.includes("firecrawl")) {
-      fcOrder.push("firecrawl")
+      callOrder.push("firecrawl")
       return jsonResponse(200, firecrawlPayload)
     }
-    fcOrder.push("serper")
-    return jsonResponse(200, serperPayload)
+    if (url.includes("api.tavily.com")) {
+      callOrder.push("tavily")
+      return jsonResponse(200, { results: [{ title: "Tavily only", url: "https://t.example", content: "body", raw_content: "body" }] })
+    }
+    callOrder.push("other")
+    return jsonResponse(200, bravePayload)
   })
-  const afterTavily = await searchWeb("photosynthesis")
-  check("Tavily fail -> Firecrawl answers, Serper untouched", afterTavily.ok && fcOrder.join(",") === "firecrawl", fcOrder.join(","))
+  const primary = await searchWeb("photosynthesis")
+  check("Firecrawl answers without touching Tavily", primary.ok && callOrder.join(",") === "firecrawl", callOrder.join(","))
+  check("Firecrawl text is used for grounding", (primary.ok ? primary.results[0]?.text.length ?? 0 : 0) > 200)
 
-  console.log("\n[2a3] Firecrawl fails -> chain continues to Serper")
+  console.log("\n[2a3] Firecrawl fails -> Tavily answers next")
   installMock((url) => {
-    if (url.includes("api.tavily.com")) return jsonResponse(429, {})
     if (url.includes("firecrawl")) return jsonResponse(401, {})
+    if (url.includes("api.tavily.com")) return jsonResponse(200, { results: [{ title: "Tavily backup", url: "https://t.example", content: "snippet", raw_content: "full tavily text" }] })
     if (url.includes("serper.dev")) return jsonResponse(200, serperPayload)
     return jsonResponse(200, bravePayload)
   })
   const afterFc = await searchWeb("photosynthesis")
-  check("falls through to Serper", afterFc.ok && afterFc.results.length === 1)
+  check("falls through to Tavily", afterFc.ok && afterFc.results[0]?.text === "full tavily text", afterFc.ok ? afterFc.results[0]?.text ?? "" : "failed")
 
-  console.log("\n[2a4] Firecrawl key empty -> skipped")
+  console.log("\n[2a4] Firecrawl key empty -> skipped, next provider answers")
   process.env.FIRECRAWL_API_KEY = ""
   installMock((url) => {
-    if (url.includes("api.tavily.com")) return jsonResponse(402, {})
     if (url.includes("firecrawl")) {
       check("Firecrawl never called without a key", false, "it was called")
       return jsonResponse(200, firecrawlPayload)
     }
-    if (url.includes("serper.dev")) return jsonResponse(200, serperPayload)
+    if (url.includes("api.tavily.com")) return jsonResponse(200, { results: [{ title: "Tavily backup", url: "https://t.example", content: "snippet", raw_content: "tavily text" }] })
     return jsonResponse(200, bravePayload)
   })
-  check("Serper answers when Firecrawl has no key", (await searchWeb("photosynthesis")).ok)
+  const skippedPrimary = await searchWeb("photosynthesis")
+  check("Tavily answers when Firecrawl has no key", skippedPrimary.ok && skippedPrimary.results[0]?.text === "tavily text")
   process.env.FIRECRAWL_API_KEY = "test-firecrawl-key"
 
   console.log("\n[2a5] SEARCH_PROVIDER=firecrawl forces Firecrawl")

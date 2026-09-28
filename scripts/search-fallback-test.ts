@@ -55,27 +55,38 @@ async function main(): Promise<void> {
   }
 
   process.env.SEARCH_PROVIDER = "auto"
-  process.env.SEARCH_API_KEY = "invalid-key-for-fallback-test"
-  await report("Test 1: Tavily forced to fail (invalid key) -> expect Firecrawl, then Serper, then Brave", query)
+  if (firecrawlKey !== "") {
+    process.env.FIRECRAWL_API_KEY = ""
+    await report("Test 1: Firecrawl (primary) unavailable -> expect Tavily", query)
+    process.env.FIRECRAWL_API_KEY = firecrawlKey
+  } else {
+    process.env.SEARCH_API_KEY = "invalid-key-for-fallback-test"
+    await report("Test 1: no Firecrawl key and Tavily forced to fail -> expect Serper, then Brave", query)
+  }
 
   if (firecrawlKey !== "") {
     process.env.SEARCH_PROVIDER = "firecrawl"
-    await report("Test 2: Firecrawl forced directly", query)
+    await report("Test 2: Firecrawl (primary) forced directly", query)
+  }
+
+  if (realTavily.trim() !== "") {
+    process.env.SEARCH_PROVIDER = "tavily"
+    await report("Test 3: Tavily (first backup) forced directly", query)
   }
 
   if (serperKey !== "") {
     process.env.SEARCH_PROVIDER = "serper"
-    await report("Test 3: Serper forced directly", query)
+    await report("Test 4: Serper forced directly", query)
   }
 
   if (braveKey !== "") {
     process.env.SEARCH_PROVIDER = "brave"
-    await report("Test 4: Brave forced directly", query)
+    await report("Test 5: Brave forced directly", query)
   }
 
   process.env.SEARCH_PROVIDER = "auto"
   process.env.SEARCH_API_KEY = realTavily
-  await report("Test 5: normal run with the real Tavily key", query)
+  await report("Test 6: normal run (expect the primary provider)", query)
 }
 
 main()
