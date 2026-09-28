@@ -25,6 +25,7 @@ loadEnv()
 const realTavily = process.env.SEARCH_API_KEY ?? ""
 const braveKey = (process.env.BRAVE_API_KEY ?? "").trim()
 const serperKey = (process.env.SERPER_API_KEY ?? "").trim()
+const firecrawlKey = (process.env.FIRECRAWL_API_KEY ?? "").trim()
 
 async function report(label: string, query: string): Promise<void> {
   console.log("\n--- " + label + " ---")
@@ -44,31 +45,37 @@ async function report(label: string, query: string): Promise<void> {
 async function main(): Promise<void> {
   const query = process.argv[2] ?? "photosynthesis"
   console.log("Tavily key configured: " + (realTavily.trim() !== "" ? "yes" : "no (keyless)"))
+  console.log("Firecrawl key configured: " + (firecrawlKey !== "" ? "yes" : "no (will be skipped)"))
   console.log("Serper key configured: " + (serperKey !== "" ? "yes" : "no (will be skipped)"))
   console.log("Brave key configured: " + (braveKey !== "" ? "yes" : "no (will be skipped)"))
 
-  if (serperKey === "" && braveKey === "") {
+  if (firecrawlKey === "" && serperKey === "" && braveKey === "") {
     console.log("\nNo backup provider is configured, so there is nothing to fall back to.")
-    console.log("Set SERPER_API_KEY and/or BRAVE_API_KEY in .env.local and run this script again.")
+    console.log("Set FIRECRAWL_API_KEY, SERPER_API_KEY and/or BRAVE_API_KEY in .env.local, then run this again.")
   }
 
   process.env.SEARCH_PROVIDER = "auto"
   process.env.SEARCH_API_KEY = "invalid-key-for-fallback-test"
-  await report("Test 1: Tavily forced to fail (invalid key) -> expect Serper, then Brave", query)
+  await report("Test 1: Tavily forced to fail (invalid key) -> expect Firecrawl, then Serper, then Brave", query)
+
+  if (firecrawlKey !== "") {
+    process.env.SEARCH_PROVIDER = "firecrawl"
+    await report("Test 2: Firecrawl forced directly", query)
+  }
 
   if (serperKey !== "") {
     process.env.SEARCH_PROVIDER = "serper"
-    await report("Test 2: Serper forced directly", query)
+    await report("Test 3: Serper forced directly", query)
   }
 
   if (braveKey !== "") {
     process.env.SEARCH_PROVIDER = "brave"
-    await report("Test 3: Brave forced directly", query)
+    await report("Test 4: Brave forced directly", query)
   }
 
   process.env.SEARCH_PROVIDER = "auto"
   process.env.SEARCH_API_KEY = realTavily
-  await report("Test 4: normal run with the real Tavily key", query)
+  await report("Test 5: normal run with the real Tavily key", query)
 }
 
 main()

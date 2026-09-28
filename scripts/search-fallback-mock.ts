@@ -1,4 +1,4 @@
-import { searchBrave, searchSerper, searchWeb } from "../src/lib/search"
+import { searchBrave, searchFirecrawl, searchSerper, searchWeb } from "../src/lib/search"
 
 const realFetch = globalThis.fetch
 
@@ -33,6 +33,21 @@ const serperPayload = {
   ],
 }
 
+const firecrawlPayload = {
+  success: true,
+  data: {
+    web: [
+      {
+        title: "Photosynthesis - Wikipedia",
+        url: "https://en.wikipedia.org/wiki/Photosynthesis",
+        description: "Process by which plants convert light into chemical energy.",
+        markdown: "# Photosynthesis\n\nPhotosynthesis is a process used by plants and other organisms to convert light energy into chemical energy that, through cellular respiration, can later be released to fuel the organism's activities.",
+      },
+      { title: "No markdown result", url: "https://example.org/x", description: "Snippet only.", markdown: null },
+    ],
+  },
+}
+
 let failures = 0
 function check(label: string, condition: boolean, detail = ""): void {
   console.log((condition ? "PASS " : "FAIL ") + label + (detail !== "" ? " -> " + detail : ""))
@@ -41,6 +56,7 @@ function check(label: string, condition: boolean, detail = ""): void {
 
 async function main(): Promise<void> {
   process.env.BRAVE_API_KEY = "test-brave-key"
+  process.env.SERPER_API_KEY = "test-serper-key"
 
   console.log("\n[1] Brave request shape + result mapping")
   let seenUrl = ""
@@ -71,7 +87,80 @@ async function main(): Promise<void> {
   await searchBrave("q", 0)
   check("count clamped up to 1", seenUrl.includes("&count=1"), seenUrl)
 
+  console.log("\n[2a] Firecrawl request shape + markdown mapping")
+  process.env.FIRECRAWL_API_KEY = "test-firecrawl-key"
+  let fcBody = ""
+  let fcHeaders: Record<string, string> = {}
+  let fcUrl = ""
+  installMock((url, init) => {
+    fcUrl = url
+    fcHeaders = (init?.headers ?? {}) as Record<string, string>
+    fcBody = String(init?.body ?? "")
+    return jsonResponse(200, firecrawlPayload)
+  })
+  const fc = await searchFirecrawl("photosynthesis", 5)
+  check("Firecrawl call succeeds", fc.ok)
+  check("URL is Firecrawl v2 search", fcUrl === "https://api.firecrawl.dev/v2/search", fcUrl)
+  check("bearer auth header sent", fcHeaders["Authorization"] === "Bearer test-firecrawl-key")
+  check("body carries query, limit and markdown format", fcBody.includes('"query":"photosynthesis"') && fcBody.includes('"limit":5') && fcBody.includes('"markdown"'), fcBody)
+  if (fc.ok) {
+    check("both results kept", fc.results.length === 2, "got " + fc.results.length)
+    const first = fc.results[0]
+    check("markdown used as full text", (first?.text.length ?? 0) > 200, "textChars=" + (first?.text.length ?? 0))
+    check("description kept as snippet", first?.snippet.startsWith("Process by which plants") === true)
+    check("null markdown falls back to description", fc.results[1]?.text === "Snippet only.")
+  }
+
+  console.log("\n[2a2] Firecrawl sits directly after Tavily in the chain")
+  const fcOrder: string[] = []
+  installMock((url) => {
+    if (url.includes("api.tavily.com")) return jsonResponse(402, {})
+    if (url.includes("firecrawl")) {
+      fcOrder.push("firecrawl")
+      return jsonResponse(200, firecrawlPayload)
+    }
+    fcOrder.push("serper")
+    return jsonResponse(200, serperPayload)
+  })
+  const afterTavily = await searchWeb("photosynthesis")
+  check("Tavily fail -> Firecrawl answers, Serper untouched", afterTavily.ok && fcOrder.join(",") === "firecrawl", fcOrder.join(","))
+
+  console.log("\n[2a3] Firecrawl fails -> chain continues to Serper")
+  installMock((url) => {
+    if (url.includes("api.tavily.com")) return jsonResponse(429, {})
+    if (url.includes("firecrawl")) return jsonResponse(401, {})
+    if (url.includes("serper.dev")) return jsonResponse(200, serperPayload)
+    return jsonResponse(200, bravePayload)
+  })
+  const afterFc = await searchWeb("photosynthesis")
+  check("falls through to Serper", afterFc.ok && afterFc.results.length === 1)
+
+  console.log("\n[2a4] Firecrawl key empty -> skipped")
+  process.env.FIRECRAWL_API_KEY = ""
+  installMock((url) => {
+    if (url.includes("api.tavily.com")) return jsonResponse(402, {})
+    if (url.includes("firecrawl")) {
+      check("Firecrawl never called without a key", false, "it was called")
+      return jsonResponse(200, firecrawlPayload)
+    }
+    if (url.includes("serper.dev")) return jsonResponse(200, serperPayload)
+    return jsonResponse(200, bravePayload)
+  })
+  check("Serper answers when Firecrawl has no key", (await searchWeb("photosynthesis")).ok)
+  process.env.FIRECRAWL_API_KEY = "test-firecrawl-key"
+
+  console.log("\n[2a5] SEARCH_PROVIDER=firecrawl forces Firecrawl")
+  process.env.SEARCH_PROVIDER = "firecrawl"
+  installMock((url) => {
+    if (url.includes("firecrawl")) return jsonResponse(200, firecrawlPayload)
+    check("no other provider called when Firecrawl is forced", false, url)
+    return jsonResponse(200, bravePayload)
+  })
+  check("forced Firecrawl returns Firecrawl results", (await searchWeb("photosynthesis")).ok)
+  delete process.env.SEARCH_PROVIDER
+
   console.log("\n[2b] Serper request shape + result mapping")
+  process.env.FIRECRAWL_API_KEY = ""
   process.env.SERPER_API_KEY = "test-serper-key"
   let serperBody = ""
   let serperHeaders: Record<string, string> = {}

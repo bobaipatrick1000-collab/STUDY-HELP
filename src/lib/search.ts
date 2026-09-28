@@ -11,7 +11,7 @@ export type SearchOutcome =
   | { ok: true; results: SearchResult[] }
   | { ok: false; kind: SearchFailureKind; message: string }
 
-export type SearchProvider = "tavily" | "serper" | "brave"
+export type SearchProvider = "tavily" | "firecrawl" | "serper" | "brave"
 
 interface ProviderFailure {
   ok: false
@@ -41,6 +41,18 @@ interface BraveResponse {
       title?: string
       url?: string
       description?: string
+    }>
+  }
+}
+
+interface FirecrawlResponse {
+  success?: boolean
+  data?: {
+    web?: Array<{
+      title?: string
+      url?: string
+      description?: string
+      markdown?: string | null
     }>
   }
 }
@@ -312,6 +324,86 @@ async function runBrave(
   return { ok: true, results: buildResults(candidates, settings.maxResultChars, settings.budgetChars) }
 }
 
+export async function searchFirecrawl(
+  query: string,
+  count = 5,
+  opts: {
+    maxResultChars?: number
+    budgetChars?: number
+  } = {},
+): Promise<SearchOutcome> {
+  const outcome = await runFirecrawl(query, count, searchOptions({ numResults: count, ...opts }))
+  if (outcome.ok) return outcome
+  return { ok: false, kind: outcome.kind, message: outcome.message }
+}
+
+async function runFirecrawl(
+  query: string,
+  count: number,
+  settings: { maxResultChars: number; budgetChars: number },
+): Promise<ProviderOutcome> {
+  const key = (process.env.FIRECRAWL_API_KEY ?? "").trim()
+  if (key === "") {
+    return {
+      ok: false,
+      kind: "config",
+      message: "Firecrawl is not configured. Add FIRECRAWL_API_KEY to .env.local, then try again.",
+      reason: "FIRECRAWL_API_KEY is not set",
+    }
+  }
+
+  const numeric = Math.floor(count)
+  const wanted = Math.min(Math.max(1, Number.isFinite(numeric) ? numeric : 5), 100)
+
+  let res: Response
+  try {
+    res = await fetch("https://api.firecrawl.dev/v2/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + key,
+      },
+      body: JSON.stringify({
+        query,
+        limit: wanted,
+        scrapeOptions: {
+          formats: [{ type: "markdown" }],
+          onlyMainContent: true,
+        },
+        timeout: 30_000,
+      }),
+      signal: AbortSignal.timeout(45_000),
+    })
+  } catch (err) {
+    return {
+      ok: false,
+      kind: "service",
+      message: "Live web search is temporarily unavailable. Please try again in a moment.",
+      reason: "Firecrawl request failed (" + (err instanceof Error ? err.name : "network error") + ")",
+    }
+  }
+
+  const data = (await res.json().catch(() => null)) as FirecrawlResponse | null
+
+  if (!res.ok) {
+    return classifyHttp(res.status, "Firecrawl")
+  }
+
+  const rawResults = data?.data?.web ?? []
+  const candidates: RawCandidate[] = rawResults.map((raw) => {
+    const description = raw.description ?? ""
+    const markdown = (raw.markdown ?? "").trim()
+    return {
+      title: raw.title,
+      url: raw.url,
+      snippet: description,
+      text: markdown !== "" ? markdown : description,
+    }
+  })
+
+  return { ok: true, results: buildResults(candidates, settings.maxResultChars, settings.budgetChars) }
+}
+
 export async function searchSerper(
   query: string,
   count = 5,
@@ -380,19 +472,21 @@ async function runSerper(
 
 export function searchProviderOverride(): "auto" | SearchProvider {
   const raw = (process.env.SEARCH_PROVIDER ?? "auto").trim().toLowerCase()
-  if (raw === "tavily" || raw === "serper" || raw === "brave") return raw
+  if (raw === "tavily" || raw === "firecrawl" || raw === "serper" || raw === "brave") return raw
   return "auto"
 }
 
 const PROVIDER_LABELS: Record<SearchProvider, string> = {
   tavily: "Tavily",
+  firecrawl: "Firecrawl",
   serper: "Serper",
   brave: "Brave",
 }
 
-const PROVIDER_CHAIN: SearchProvider[] = ["tavily", "serper", "brave"]
+const PROVIDER_CHAIN: SearchProvider[] = ["tavily", "firecrawl", "serper", "brave"]
 
 function providerConfigured(provider: SearchProvider): boolean {
+  if (provider === "firecrawl") return (process.env.FIRECRAWL_API_KEY ?? "").trim() !== ""
   if (provider === "serper") return (process.env.SERPER_API_KEY ?? "").trim() !== ""
   if (provider === "brave") return (process.env.BRAVE_API_KEY ?? "").trim() !== ""
   return true
@@ -403,6 +497,7 @@ function runProvider(
   query: string,
   settings: { numResults: number; maxResultChars: number; budgetChars: number },
 ): Promise<ProviderOutcome> {
+  if (provider === "firecrawl") return runFirecrawl(query, settings.numResults, settings)
   if (provider === "serper") return runSerper(query, settings.numResults, settings)
   if (provider === "brave") return runBrave(query, settings.numResults, settings)
   return runTavily(query, settings)
