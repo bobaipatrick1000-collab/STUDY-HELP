@@ -11,7 +11,7 @@ export type SearchOutcome =
   | { ok: true; results: SearchResult[] }
   | { ok: false; kind: SearchFailureKind; message: string }
 
-export type SearchProvider = "tavily" | "brave"
+export type SearchProvider = "tavily" | "serper" | "brave"
 
 interface ProviderFailure {
   ok: false
@@ -43,6 +43,15 @@ interface BraveResponse {
       description?: string
     }>
   }
+}
+
+interface SerperResponse {
+  organic?: Array<{
+    title?: string
+    link?: string
+    snippet?: string
+    date?: string
+  }>
 }
 
 interface RawCandidate {
@@ -303,14 +312,100 @@ async function runBrave(
   return { ok: true, results: buildResults(candidates, settings.maxResultChars, settings.budgetChars) }
 }
 
-export function searchProviderOverride(): "auto" | "tavily" | "brave" {
+export async function searchSerper(
+  query: string,
+  count = 5,
+  opts: {
+    maxResultChars?: number
+    budgetChars?: number
+  } = {},
+): Promise<SearchOutcome> {
+  const outcome = await runSerper(query, count, searchOptions({ numResults: count, ...opts }))
+  if (outcome.ok) return outcome
+  return { ok: false, kind: outcome.kind, message: outcome.message }
+}
+
+async function runSerper(
+  query: string,
+  count: number,
+  settings: { maxResultChars: number; budgetChars: number },
+): Promise<ProviderOutcome> {
+  const key = (process.env.SERPER_API_KEY ?? "").trim()
+  if (key === "") {
+    return {
+      ok: false,
+      kind: "config",
+      message: "Serper is not configured. Add SERPER_API_KEY to .env.local, then try again.",
+      reason: "SERPER_API_KEY is not set",
+    }
+  }
+
+  const numeric = Math.floor(count)
+  const wanted = Math.min(Math.max(1, Number.isFinite(numeric) ? numeric : 5), 100)
+
+  let res: Response
+  try {
+    res = await fetch("https://google.serper.dev/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-KEY": key,
+      },
+      body: JSON.stringify({ q: query, num: wanted }),
+      signal: AbortSignal.timeout(30_000),
+    })
+  } catch (err) {
+    return {
+      ok: false,
+      kind: "service",
+      message: "Live web search is temporarily unavailable. Please try again in a moment.",
+      reason: "Serper request failed (" + (err instanceof Error ? err.name : "network error") + ")",
+    }
+  }
+
+  const data = (await res.json().catch(() => null)) as SerperResponse | null
+
+  if (!res.ok) {
+    return classifyHttp(res.status, "Serper")
+  }
+
+  const rawResults = data?.organic ?? []
+  const candidates: RawCandidate[] = rawResults.map((raw) => {
+    const snippet = raw.snippet ?? ""
+    return { title: raw.title, url: raw.link, snippet, text: snippet }
+  })
+
+  return { ok: true, results: buildResults(candidates, settings.maxResultChars, settings.budgetChars) }
+}
+
+export function searchProviderOverride(): "auto" | SearchProvider {
   const raw = (process.env.SEARCH_PROVIDER ?? "auto").trim().toLowerCase()
-  if (raw === "tavily" || raw === "brave") return raw
+  if (raw === "tavily" || raw === "serper" || raw === "brave") return raw
   return "auto"
 }
 
-function braveKeyConfigured(): boolean {
-  return (process.env.BRAVE_API_KEY ?? "").trim() !== ""
+const PROVIDER_LABELS: Record<SearchProvider, string> = {
+  tavily: "Tavily",
+  serper: "Serper",
+  brave: "Brave",
+}
+
+const PROVIDER_CHAIN: SearchProvider[] = ["tavily", "serper", "brave"]
+
+function providerConfigured(provider: SearchProvider): boolean {
+  if (provider === "serper") return (process.env.SERPER_API_KEY ?? "").trim() !== ""
+  if (provider === "brave") return (process.env.BRAVE_API_KEY ?? "").trim() !== ""
+  return true
+}
+
+function runProvider(
+  provider: SearchProvider,
+  query: string,
+  settings: { numResults: number; maxResultChars: number; budgetChars: number },
+): Promise<ProviderOutcome> {
+  if (provider === "serper") return runSerper(query, settings.numResults, settings)
+  if (provider === "brave") return runBrave(query, settings.numResults, settings)
+  return runTavily(query, settings)
 }
 
 export async function searchWeb(
@@ -324,68 +419,70 @@ export async function searchWeb(
   const settings = searchOptions(opts)
   const override = searchProviderOverride()
 
-  if (override === "brave") {
-    const brave = await runBrave(query, settings.numResults, settings)
-    if (brave.ok) {
-      console.log("Search provider: Brave (forced by SEARCH_PROVIDER)")
-      return brave
+  if (override !== "auto") {
+    const forced = await runProvider(override, query, settings)
+    const label = PROVIDER_LABELS[override]
+    if (forced.ok) {
+      console.log(
+        "Search provider: " + label + " (forced by SEARCH_PROVIDER" + (forced.results.length === 0 ? ", no results" : "") + ")",
+      )
+      return forced
     }
-    console.log("Search provider: none (Brave forced by SEARCH_PROVIDER failed: " + brave.reason + ")")
-    return { ok: false, kind: brave.kind, message: brave.message }
+    console.log("Search provider: none (" + label + " forced by SEARCH_PROVIDER failed: " + forced.reason + ")")
+    return { ok: false, kind: forced.kind, message: forced.message }
   }
 
-  const tavily = await runTavily(query, settings)
+  const failures: string[] = []
+  let attempted = 0
+  let firstHardFailure: ProviderFailure | null = null
+  let emptyOutcome: { ok: true; results: SearchResult[] } | null = null
 
-  if (tavily.ok && tavily.results.length > 0) {
-    console.log("Search provider: Tavily")
-    return tavily
-  }
-
-  const tavilyReason = tavily.ok ? "empty response" : tavily.reason
-
-  if (override === "tavily" || !braveKeyConfigured()) {
-    if (tavily.ok) {
-      console.log("Search provider: Tavily (no results)")
-      return tavily
+  for (const provider of PROVIDER_CHAIN) {
+    const label = PROVIDER_LABELS[provider]
+    if (!providerConfigured(provider)) {
+      console.log("Search provider: skipping " + label + " (no API key configured)")
+      continue
     }
-    console.log(
-      "Search provider: Tavily failed (" +
-        tavily.reason +
-        "); Brave fallback skipped" +
-        (override === "tavily" ? " (SEARCH_PROVIDER=tavily)" : " (BRAVE_API_KEY not set)"),
-    )
-    return { ok: false, kind: tavily.kind, message: tavily.message }
+    attempted++
+    const outcome = await runProvider(provider, query, settings)
+    if (outcome.ok) {
+      if (outcome.results.length > 0) {
+        console.log(
+          "Search provider: " + label + (failures.length > 0 ? " (" + failures.join("; ") + ")" : ""),
+        )
+        return outcome
+      }
+      if (!emptyOutcome) emptyOutcome = outcome
+      failures.push(label + " returned no results")
+      continue
+    }
+    if (!firstHardFailure) firstHardFailure = outcome
+    failures.push(outcome.reason)
   }
 
-  const brave = await runBrave(query, settings.numResults, settings)
-  if (brave.ok && brave.results.length > 0) {
-    console.log("Search provider: Brave (Tavily failed: " + tavilyReason + ")")
-    return brave
+  if (failures.length === 0) {
+    return {
+      ok: false,
+      kind: "config",
+      message: "No web search provider is configured. Add a search API key to .env.local, then try again.",
+    }
   }
 
-  if (brave.ok) {
-    console.log(
-      "Search provider: Tavily empty and Brave empty (Tavily: " +
-        tavilyReason +
-        ", Brave: empty response)",
-    )
-    return { ok: true, results: [] }
+  if (emptyOutcome) {
+    console.log("Search provider: none (all providers returned no results: " + failures.join("; ") + ")")
+    return emptyOutcome
   }
 
-  if (tavily.ok) {
-    console.log(
-      "Search provider: none (Tavily: empty response; Brave failed: " + brave.reason + ")",
-    )
-    return { ok: true, results: [] }
+  console.log("Search provider: none (" + failures.join("; ") + ")")
+
+  if (attempted === 1 && firstHardFailure) {
+    return { ok: false, kind: firstHardFailure.kind, message: firstHardFailure.message }
   }
 
-  console.log(
-    "Search provider: none (Tavily failed: " + tavily.reason + "; Brave failed: " + brave.reason + ")",
-  )
   return {
     ok: false,
     kind: "service",
     message:
-      "Live web search is unavailable right now (the primary provider and the backup both failed). Please try again in a moment.",
+      "Live web search is unavailable right now (every configured provider failed). Please try again in a moment.",
   }
 }
