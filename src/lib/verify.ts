@@ -1,4 +1,4 @@
-import { aiGenerateText } from "./ai"
+import { aiGenerateText, callWithBudgetFallback } from "./ai"
 import { callWithRetry } from "./geminiClient"
 import { parseJsonSmart, stripCodeFences } from "./json"
 
@@ -137,12 +137,16 @@ export async function verifyTextDraft(
     let response: { text: string }
     try {
       response = await callWithRetry(() =>
-        aiGenerateText({
-          systemPrompt: VERIFY_TEXT_SYSTEM_PROMPT,
-          userContent,
-          temperature: 0,
-          maxOutputTokens: 4096,
-        }),
+        callWithBudgetFallback(
+          (maxOutputTokens) =>
+            aiGenerateText({
+              systemPrompt: VERIFY_TEXT_SYSTEM_PROMPT,
+              userContent,
+              temperature: 0,
+              maxOutputTokens,
+            }),
+          4096,
+        ),
       )
     } catch (err) {
       // Safe fallback: if the verification pass fails, keep the draft untouched.
@@ -171,12 +175,16 @@ async function runSegmentVerify(
     let response: { text: string }
     try {
       response = await callWithRetry(() =>
-        aiGenerateText({
-          systemPrompt: VERIFY_PACK_SYSTEM_PROMPT,
-          userContent,
-          temperature: 0,
-          maxOutputTokens: 4096,
-        }),
+        callWithBudgetFallback(
+          (maxOutputTokens) =>
+            aiGenerateText({
+              systemPrompt: VERIFY_PACK_SYSTEM_PROMPT,
+              userContent,
+              temperature: 0,
+              maxOutputTokens,
+            }),
+          4096,
+        ),
       )
     } catch (err) {
       console.error("verifyPackText failed:", err)
