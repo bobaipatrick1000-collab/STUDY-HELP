@@ -34,7 +34,7 @@ async function run(label: string, query: string) {
     return
   }
 
-  console.log("Tavily returned " + outcome.results.length + " raw result(s).")
+  console.log("Search returned " + outcome.results.length + " raw result(s).")
   const ranked = rankResults(outcome.results)
   console.log("After ranking/dedupe/blocklist: " + ranked.length + " kept.\n")
 

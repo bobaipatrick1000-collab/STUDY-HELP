@@ -1,7 +1,7 @@
 import { createHash } from "crypto"
 import { mkdir, readFile, writeFile } from "fs/promises"
 import path from "path"
-import { searchAndExtract } from "./search"
+import { searchWeb } from "./search"
 import type { SearchResult, SearchOutcome } from "./search"
 
 const mem = new Map<string, { at: number; results: SearchResult[] }>()
@@ -63,7 +63,7 @@ export async function searchWithCache(
     const cached = await getCachedSearch(key)
     if (cached) return { ok: true, results: cached }
   }
-  const outcome = await searchAndExtract(query)
+  const outcome = await searchWeb(query)
   if (outcome.ok) {
     await setCachedSearch(key, outcome.results)
   }
