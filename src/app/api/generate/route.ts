@@ -55,7 +55,9 @@ async function handle(request: Request): Promise<Response> {
   }
 
   const status =
-    result.kind === "rate-limit"
+    result.kind === "billing"
+      ? 402
+      : result.kind === "rate-limit"
       ? 429
       : result.kind === "config"
         ? 500

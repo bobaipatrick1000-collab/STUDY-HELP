@@ -1,4 +1,4 @@
-import { aiGenerateText, resolveConfigError, resolveModel } from "./ai"
+import { aiGenerateText, callWithBudgetFallback, resolveConfigError, resolveModel } from "./ai"
 import { buildSourceList } from "./grounding"
 import type { TopicSource } from "./types"
 import {
@@ -21,6 +21,7 @@ export interface QuizOptionsInput extends QuizOptionCard {
 
 export type QuizOptionsFailureKind =
   | "config"
+  | "billing"
   | "rate-limit"
   | "model"
   | "response"
@@ -131,12 +132,16 @@ export async function generateQuizOptions(
 
   async function attempt(): Promise<Record<string, string[]> | null> {
     const response = await callWithRetry(() =>
-      aiGenerateText({
-        systemPrompt: QUIZ_OPTIONS_SYSTEM_PROMPT,
-        userContent: contents,
-        temperature: 1,
-        maxOutputTokens: 8192,
-      }),
+      callWithBudgetFallback(
+        (maxOutputTokens) =>
+          aiGenerateText({
+            systemPrompt: QUIZ_OPTIONS_SYSTEM_PROMPT,
+            userContent: contents,
+            temperature: 1,
+            maxOutputTokens,
+          }),
+        8192,
+      ),
     )
     if (response.text === "") return null
     return parseOptions(response.text, cards)
@@ -165,7 +170,7 @@ export async function generateQuizOptions(
 
     const billing = billingMessage(err)
     if (billing) {
-      return { ok: false, kind: "rate-limit", message: billing }
+      return { ok: false, kind: "billing", message: billing }
     }
 
     if (

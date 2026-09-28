@@ -1,4 +1,5 @@
 import { GoogleGenAI } from "@google/genai"
+import { affordableTokens } from "./geminiClient"
 
 export type AiProvider = "google" | "openrouter"
 
@@ -137,4 +138,24 @@ async function generateOpenRouterText(input: AiGenerateInput): Promise<AiTextRes
 export async function aiGenerateText(input: AiGenerateInput): Promise<AiTextResult> {
   if (resolveProvider() === "google") return generateGoogleText(input)
   return generateOpenRouterText(input)
+}
+
+export async function callWithBudgetFallback(
+  fn: (maxOutputTokens: number) => Promise<AiTextResult>,
+  requested: number,
+): Promise<AiTextResult> {
+  try {
+    return await fn(requested)
+  } catch (err) {
+    const affordable = affordableTokens(err)
+    if (affordable === null) throw err
+    const reduced = Math.max(1_024, Math.min(requested, affordable - 256))
+    console.warn(
+      "AI call failed for budget reasons; retrying with maxOutputTokens",
+      requested,
+      "->",
+      reduced,
+    )
+    return await fn(reduced)
+  }
 }

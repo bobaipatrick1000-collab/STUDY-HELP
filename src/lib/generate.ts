@@ -1,6 +1,6 @@
 import { NOTES_MAX_LENGTH } from "./constants"
 import { GENERATE_CARDS_SYSTEM_PROMPT } from "./generatePrompt"
-import { aiGenerateText, resolveConfigError, resolveModel } from "./ai"
+import { aiGenerateText, callWithBudgetFallback, resolveConfigError, resolveModel } from "./ai"
 import { buildGroundingBlock, isUsableGrounding, rankResults } from "./grounding"
 import { searchWithCache } from "./searchCache"
 import { isTopicCovered } from "./relevance"
@@ -21,6 +21,7 @@ export interface DraftCard {
 
 export type GenerateFailureKind =
   | "config"
+  | "billing"
   | "rate-limit"
   | "model"
   | "response"
@@ -96,12 +97,16 @@ export async function generateCards(input: GenerateInput): Promise<GenerateResul
 
   async function attempt(): Promise<DraftCard[] | null> {
     const response = await callWithRetry(() =>
-      aiGenerateText({
-        systemPrompt: GENERATE_CARDS_SYSTEM_PROMPT,
-        userContent: contents,
-        temperature: 0.5,
-        maxOutputTokens: 8192,
-      }),
+      callWithBudgetFallback(
+        (maxOutputTokens) =>
+          aiGenerateText({
+            systemPrompt: GENERATE_CARDS_SYSTEM_PROMPT,
+            userContent: contents,
+            temperature: 0.5,
+            maxOutputTokens,
+          }),
+        8192,
+      ),
     )
     if (response.text === "") return null
     return parseCards(response.text, input.count)
@@ -131,7 +136,7 @@ export async function generateCards(input: GenerateInput): Promise<GenerateResul
 
     const billing = billingMessage(err)
     if (billing) {
-      return { ok: false, kind: "rate-limit", message: billing }
+      return { ok: false, kind: "billing", message: billing }
     }
 
     if (

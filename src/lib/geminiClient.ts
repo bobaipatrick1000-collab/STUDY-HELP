@@ -67,22 +67,35 @@ export async function callWithRetry<T>(fn: () => Promise<T>, attempts = 3): Prom
   throw last
 }
 
+export function affordableTokens(err: unknown): number | null {
+  const match = messageOf(err).match(/can only afford (\d+)/i)
+  if (!match) return null
+  const value = Number.parseInt(match[1], 10)
+  return Number.isFinite(value) && value > 0 ? value : null
+}
+
 export function billingMessage(err: unknown): string | null {
   const status = statusOf(err)
-  if (status === 402) {
-    return "Your AI provider has no credits for this request. Add credits on OpenRouter (openrouter.ai) or Google AI Studio, then try again."
-  }
   const lower = messageOf(err).toLowerCase()
-  if (
+  const isBilling =
+    status === 402 ||
     lower.includes("insufficient") ||
     lower.includes("funds") ||
     lower.includes("payment") ||
     lower.includes("billing") ||
     lower.includes("credit")
-  ) {
-    return "Your AI provider has no credits for this request. Add credits on OpenRouter (openrouter.ai) or Google AI Studio, then try again."
+  if (!isBilling) return null
+
+  const affordable = affordableTokens(err)
+  if (affordable !== null) {
+    return (
+      "Your OpenRouter balance is too low for this request. It can currently afford about " +
+      String(affordable) +
+      " output tokens, but the app asked for more. Add credits at openrouter.ai/settings/credits, " +
+      "or pick a cheaper model in AI_MODEL in .env.local."
+    )
   }
-  return null
+  return "Your AI provider has no credits for this request. Add credits on OpenRouter (openrouter.ai) or Google AI Studio, then try again."
 }
 
 export function rateLimitMessage(err: unknown, model: string): string {

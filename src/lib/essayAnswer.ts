@@ -1,4 +1,4 @@
-import { aiGenerateText, resolveConfigError, resolveModel } from "./ai"
+import { aiGenerateText, callWithBudgetFallback, resolveConfigError, resolveModel } from "./ai"
 import { buildGroundingBlock, isUsableGrounding, rankResults } from "./grounding"
 import { searchWithCache } from "./searchCache"
 import { isTopicCovered } from "./relevance"
@@ -14,6 +14,7 @@ import {
 
 export type EssayAnswerFailureKind =
   | "config"
+  | "billing"
   | "rate-limit"
   | "model"
   | "response"
@@ -100,12 +101,16 @@ export async function generateEssayAnswer(
 
   async function attempt(): Promise<string | null> {
     const response = await callWithRetry(() =>
-      aiGenerateText({
-        systemPrompt: ESSAY_ANSWER_SYSTEM_PROMPT,
-        userContent: contents,
-        temperature: 0.5,
-        maxOutputTokens: 8192,
-      }),
+      callWithBudgetFallback(
+        (maxOutputTokens) =>
+          aiGenerateText({
+            systemPrompt: ESSAY_ANSWER_SYSTEM_PROMPT,
+            userContent: contents,
+            temperature: 0.5,
+            maxOutputTokens,
+          }),
+        8192,
+      ),
     )
     const text = response.text.trim()
     if (text === "") return null
@@ -157,7 +162,7 @@ export async function generateEssayAnswer(
 
     const billing = billingMessage(err)
     if (billing) {
-      return { ok: false, kind: "rate-limit", message: billing }
+      return { ok: false, kind: "billing", message: billing }
     }
 
     if (

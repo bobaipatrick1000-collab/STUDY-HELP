@@ -1,4 +1,4 @@
-import { aiGenerateText, resolveConfigError, resolveModel } from "./ai"
+import { aiGenerateText, callWithBudgetFallback, resolveConfigError, resolveModel } from "./ai"
 import { buildGroundingBlock, isUsableGrounding, rankResults } from "./grounding"
 import { validateChoices } from "./quizOptions"
 import { searchWithCache } from "./searchCache"
@@ -27,6 +27,7 @@ export interface TopicEssayResult {
 
 export type TopicPackFailureKind =
   | "config"
+  | "billing"
   | "rate-limit"
   | "model"
   | "response"
@@ -78,7 +79,7 @@ function classify(err: unknown, model: string): TopicPackResult {
 
   const billing = billingMessage(err)
   if (billing) {
-    return { ok: false, kind: "rate-limit", message: billing }
+    return { ok: false, kind: "billing", message: billing }
   }
 
   if (
@@ -263,12 +264,16 @@ export async function generateTopicPack(params: {
   async function callPack(): Promise<{ text: string } | null> {
     const response = await callWithRetry(
       () =>
-        aiGenerateText({
-          systemPrompt: PACK_SYSTEM_PROMPT,
-          userContent: packPrompt,
-          temperature: 0.6,
-          maxOutputTokens: 8192,
-        }),
+        callWithBudgetFallback(
+          (maxOutputTokens) =>
+            aiGenerateText({
+              systemPrompt: PACK_SYSTEM_PROMPT,
+              userContent: packPrompt,
+              temperature: 0.6,
+              maxOutputTokens,
+            }),
+          8192,
+        ),
       2,
     )
     if (response.text === "") return null
